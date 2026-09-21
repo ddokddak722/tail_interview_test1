@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>꼬리물기 면접 모드</title>
+<meta name="description" content="자기소개서/이력서 기반 AI 꼬리질문 모의면접">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=Gowun+Dodum&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="backdrop"><div class="desk"></div></div>
+<div class="vignette"></div>
+
+<div class="app">
+  <div class="topbar">
+    <div class="brand">꼬리물기 면접 모드</div>
+    <button class="small-btn" id="apiKeyChangeBtn">🔑 API 키 변경</button>
+  </div>
+
+  <!-- ================= API KEY SETUP (first run only) ================= -->
+  <section id="sceneTailKeySetup" hidden>
+    <div class="stage">
+      <div class="char-wrap" id="keySetupCharWrap"></div>
+    </div>
+    <div class="panel">
+      <div class="speaker">시작하기 전에</div>
+      <div class="dialogue-text">
+        이 모드는 참가자 본인의 무료 Gemini API 키가 있어야 이용할 수 있어요.<br>
+        신용카드 등록이나 구독 없이, 구글 계정만 있으면 1분 안에 무료로 발급받을 수 있어요.<br>
+        발급받은 키는 이 브라우저에만 저장되고, 다른 사람에게 전송되지 않아요.
+      </div>
+      <div class="answer-row">
+        <div class="btn-row" style="justify-content:center;">
+          <a class="btn" id="keyGetLinkBtn" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" style="display:inline-block; text-decoration:none; text-align:center;">🔑 무료 API 키 발급받기 (새 탭에서 열기)</a>
+        </div>
+        <div class="admin-note">
+          <div style="margin-bottom:6px; font-weight:700;">발급 방법 (3단계)</div>
+          <div>1. 구글 계정으로 로그인</div>
+          <div>2. "Create API key" 클릭</div>
+          <div>3. 생성된 키 복사</div>
+        </div>
+        <input class="name-input" id="tailApiKeyInput" type="text" placeholder="발급받은 API 키를 여기에 붙여넣으세요" autocomplete="off" spellcheck="false">
+        <div class="modal-msg" id="tailApiKeyMsg"></div>
+        <div class="btn-row" style="justify-content:center;">
+          <button class="btn" id="tailApiKeySaveBtn">저장하고 시작하기</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= INTRO / LANDING ================= -->
+  <section id="sceneIntro">
+    <div class="title-block">
+      <h1>꼬리물기 면접 모드</h1>
+      <p>자기소개서·이력서를 바탕으로 AI 면접관이 실제처럼 꼬리 질문을 이어갑니다.</p>
+    </div>
+    <div class="stage">
+      <div class="char-wrap" id="introCharWrap"></div>
+    </div>
+    <div class="panel">
+      <div class="speaker" id="introSpeaker"></div>
+      <div class="dialogue-text" id="introLine"></div>
+      <div class="answer-row">
+        <input class="name-input" id="playerNameInput" type="text" maxlength="12" placeholder="플레이어 이름을 입력하세요">
+        <div class="btn-row" style="justify-content:center;">
+          <button class="btn" id="tailModeBtn">🔥 꼬리물기 면접 시작하기</button>
+        </div>
+        <div id="aiStatusLine" style="font-size:.68rem; color:#cfc4a4cc; text-align:center; margin-top:6px; min-height:1.2em;"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= TAIL MODE: SETUP ================= -->
+  <section id="sceneTailSetup" hidden>
+    <div class="stage">
+      <div class="char-wrap" id="tailSetupCharWrap"></div>
+    </div>
+    <div class="panel">
+      <div class="speaker" id="tailSetupSpeaker"></div>
+      <div class="dialogue-text">자기소개서·이력서를 보고 직접 꼬리 질문을 드려볼게요. 아래 내용을 입력해주세요.</div>
+      <div class="answer-row">
+        <input class="name-input" id="tailSchoolInput" type="text" placeholder="학교 (선택)">
+        <input class="name-input" id="tailMajorInput" type="text" placeholder="전공 (선택)">
+        <input class="name-input" id="tailCompanyInput" type="text" placeholder="희망 기업 (선택)">
+        <input class="name-input" id="tailRoleInput" type="text" placeholder="희망 직무 (선택)">
+        <textarea class="answer-input" id="tailResumeInput" style="min-height:140px;" placeholder="자기소개서 및 이력서 내용을 이곳에 붙여넣어주세요."></textarea>
+        <div class="admin-note" style="margin:2px 0;">
+          <div style="margin-bottom:6px; font-weight:700;">이 세션 결과를 진행자 중앙 기록에 어디까지 공유할까요?</div>
+          <label style="display:block;margin-bottom:4px;"><input type="radio" name="tailScope" value="full" checked> 전체 공유 (자기소개서·답변 내용 포함)</label>
+          <label style="display:block;margin-bottom:4px;"><input type="radio" name="tailScope" value="summary"> 요약만 공유 (자기소개서 내용은 제외)</label>
+          <label style="display:block;"><input type="radio" name="tailScope" value="none"> 공유하지 않음</label>
+        </div>
+        <div class="modal-msg" id="tailSetupMsg"></div>
+        <div class="btn-row">
+          <button class="btn secondary" id="tailBackBtn">메인으로</button>
+          <button class="btn" id="tailStartBtn">시작하기</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= TAIL MODE: QUESTION LOOP ================= -->
+  <section id="sceneTailQuestion" hidden>
+    <div class="stage">
+      <div class="char-name-tag" id="tailCharTag"></div>
+      <div class="char-wrap" id="tailCharWrap"></div>
+    </div>
+    <div class="panel">
+      <div class="speaker" id="tailSpeaker"></div>
+      <div class="progress-tag" id="tailProgress"></div>
+      <div id="tailFeedbackBlock" hidden style="margin:8px 0;"></div>
+      <div class="dialogue-text" id="tailLine"></div>
+      <div class="btn-row" id="tailKeyFixRow" hidden style="justify-content:center; margin-top:10px;">
+        <button class="btn secondary" id="tailKeyFixBtn">🔑 API 키 변경하기</button>
+      </div>
+      <div class="answer-row" id="tailAnswerRow" hidden>
+        <textarea class="answer-input" id="tailAnswerInput" placeholder="답변을 입력하세요..."></textarea>
+        <div class="btn-row">
+          <button class="btn" id="tailSubmitBtn">답변 제출</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= TAIL MODE: FINAL ================= -->
+  <section id="sceneTailFinal" hidden>
+    <div class="stage">
+      <div class="char-wrap" id="tailFinalCharWrap"></div>
+    </div>
+    <div class="panel">
+      <div class="dialogue-text" id="tailFinalLine"></div>
+      <div class="breakdown-hint">질문을 탭하면 내 답변과 자세한 피드백을 볼 수 있어요</div>
+      <div class="breakdown-list" id="tailBreakdownList"></div>
+      <div class="btn-row primary-row" id="tailSubmitResultRow">
+        <button class="btn full-width" id="tailSubmitResultBtn">📤 제출 결과 보내기</button>
+      </div>
+      <div class="modal-msg" id="tailFinalMsg"></div>
+      <div class="btn-row secondary-row">
+        <button class="btn secondary" id="tailFinalSaveBtn">📄 결과 파일로 저장</button>
+        <button class="btn secondary" id="tailFinalHomeBtn">메인으로</button>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- ================= UNLOCK-CODE MODAL ================= -->
+<div class="modal-overlay" id="codeOverlay" hidden></div>
+
+<script src="script.js"></script>
+</body>
+</html>
