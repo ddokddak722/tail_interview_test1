@@ -330,7 +330,8 @@ var RESPONSE_SCHEMA = {
   },
   required: ["isDone", "questionNumber", "totalQuestions"]
 };
-var GEMINI_MODEL = "gemini-2.5-flash"; // stable model w/ confirmed free-tier limits; can be bumped later
+var GEMINI_MODEL = "gemini-3.6-flash"; // gemini-2.5-flash was retired for new API keys (Sept 2026); Google's own
+                                        // error response for this key directed us to gemini-3.6-flash specifically
 
 function mapTranscriptToContents(transcript){
   return transcript.map(function(turn){
