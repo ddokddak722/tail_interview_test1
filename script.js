@@ -464,6 +464,13 @@ function handleTailError(err){
     msg = "입력하신 내용이 안전 정책에 걸려 응답을 만들 수 없었어요. 자기소개서 내용을 조금 수정해서 다시 시도해보세요.";
   }
 
+  // Always show the raw diagnostic (code + upstream message) on-screen too —
+  // there's no other channel to see WHY a participant's call failed, so this
+  // needs to be readable directly off a screenshot rather than devtools.
+  var diag = code || "unknown";
+  if(err && err.message) diag += " — " + err.message;
+  msg += " (진단정보: " + diag + ")";
+
   el.tailProgress.textContent = "";
   el.tailLine.textContent = msg;
   el.tailFeedbackBlock.hidden = true;
