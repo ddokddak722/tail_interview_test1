@@ -342,15 +342,16 @@ function mapTranscriptToContents(transcript){
   });
 }
 
-function tailCallAI(userTurnContent){
-  tailTranscript.push({role:"user", content: userTurnContent});
-
+// Single attempt against Gemini. Rejects with {code, message, retryable}.
+// "retryable" marks transient, infrastructure-side failures (the model's
+// shared capacity being temporarily overloaded, or a one-off network blip)
+// as opposed to problems that won't fix themselves on retry (bad/expired
+// key, this account's own quota, blocked content, a malformed request).
+function performGeminiRequest(contents){
   var apiKey = getSavedApiKey();
   if(!apiKey){
-    return Promise.reject({code:"no_key", message:"저장된 API 키가 없습니다."});
+    return Promise.reject({code:"no_key", message:"저장된 API 키가 없습니다.", retryable:false});
   }
-
-  var contents = mapTranscriptToContents(tailTranscript);
   var endpoint = "https://generativelanguage.googleapis.com/v1beta/models/" + GEMINI_MODEL + ":generateContent?key=" + encodeURIComponent(apiKey);
 
   return fetch(endpoint, {
@@ -364,45 +365,74 @@ function tailCallAI(userTurnContent){
       }
     })
   }).catch(function(){
-    throw {code:"network_error", message:"Gemini API 호출 중 네트워크 오류가 발생했습니다."};
+    throw {code:"network_error", message:"Gemini API 호출 중 네트워크 오류가 발생했습니다.", retryable:true};
   }).then(function(geminiRes){
     return geminiRes.json().catch(function(){
-      throw {code:"invalid_upstream_response", message:"Gemini API 응답을 해석할 수 없습니다."};
+      throw {code:"invalid_upstream_response", message:"Gemini API 응답을 해석할 수 없습니다.", retryable:false};
     }).then(function(geminiBody){
       if(!geminiRes.ok){
         var upstreamMsg = (geminiBody && geminiBody.error && geminiBody.error.message) || ("Gemini API 오류 (HTTP " + geminiRes.status + ")");
         if(geminiRes.status === 401 || geminiRes.status === 403){
-          throw {code:"invalid_key", message: upstreamMsg};
+          throw {code:"invalid_key", message: upstreamMsg, retryable:false};
         }
         if(geminiRes.status === 429){
-          throw {code:"rate_limited", message: upstreamMsg};
+          throw {code:"rate_limited", message: upstreamMsg, retryable:false};
         }
-        throw {code:"upstream_error", message: upstreamMsg};
+        // 500/503 are Google's own "temporary overload / try again" signals
+        // (e.g. "This model is currently experiencing high demand" — a
+        // shared-capacity issue across ALL users of that model, unrelated
+        // to this key's own usage) — worth a couple of automatic retries.
+        var retryable = (geminiRes.status === 503 || geminiRes.status === 500);
+        throw {code:"upstream_error", message: upstreamMsg, retryable: retryable};
       }
 
       if(geminiBody && geminiBody.promptFeedback && geminiBody.promptFeedback.blockReason){
-        throw {code:"blocked_content", message:"입력 내용이 안전 정책에 의해 차단되었습니다: " + geminiBody.promptFeedback.blockReason};
+        throw {code:"blocked_content", message:"입력 내용이 안전 정책에 의해 차단되었습니다: " + geminiBody.promptFeedback.blockReason, retryable:false};
       }
 
       var candidate = geminiBody && geminiBody.candidates && geminiBody.candidates[0];
       if(!candidate){
-        throw {code:"no_candidate", message:"Gemini API가 응답 후보를 반환하지 않았습니다."};
+        throw {code:"no_candidate", message:"Gemini API가 응답 후보를 반환하지 않았습니다.", retryable:false};
       }
       if(candidate.finishReason === "SAFETY"){
-        throw {code:"blocked_content", message:"생성된 응답이 안전 정책에 의해 차단되었습니다."};
+        throw {code:"blocked_content", message:"생성된 응답이 안전 정책에 의해 차단되었습니다.", retryable:false};
       }
 
       var text = candidate.content && candidate.content.parts && candidate.content.parts[0] && candidate.content.parts[0].text;
       if(typeof text !== "string"){
-        throw {code:"empty_response", message:"Gemini API 응답에서 텍스트를 찾을 수 없습니다."};
+        throw {code:"empty_response", message:"Gemini API 응답에서 텍스트를 찾을 수 없습니다.", retryable:false};
       }
 
       var parsed;
       try{ parsed = JSON.parse(text); }
-      catch(e){ throw {code:"invalid_json", message:"Gemini API 응답이 유효한 JSON이 아닙니다."}; }
+      catch(e){ throw {code:"invalid_json", message:"Gemini API 응답이 유효한 JSON이 아닙니다.", retryable:false}; }
       return parsed;
     });
-  }).then(function(data){
+  });
+}
+
+function delay(ms){ return new Promise(function(resolve){ setTimeout(resolve, ms); }); }
+
+// Retries only "retryable" (infrastructure-side, transient) failures, with
+// a short backoff — up to 2 retries (3 attempts total). Anything else
+// (bad key, this account's quota, blocked content) fails immediately,
+// since retrying those can't help.
+function performGeminiRequestWithRetry(contents, attempt){
+  attempt = attempt || 1;
+  return performGeminiRequest(contents).catch(function(err){
+    if(err && err.retryable && attempt < 3){
+      return delay(attempt === 1 ? 1500 : 3000).then(function(){
+        return performGeminiRequestWithRetry(contents, attempt + 1);
+      });
+    }
+    throw err;
+  });
+}
+
+function tailCallAI(userTurnContent){
+  tailTranscript.push({role:"user", content: userTurnContent});
+  var contents = mapTranscriptToContents(tailTranscript);
+  return performGeminiRequestWithRetry(contents).then(function(data){
     tailTranscript.push({role:"assistant", content: JSON.stringify(data)});
     return data;
   });
