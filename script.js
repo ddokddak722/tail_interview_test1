@@ -330,8 +330,13 @@ var RESPONSE_SCHEMA = {
   },
   required: ["isDone", "questionNumber", "totalQuestions"]
 };
-var GEMINI_MODEL = "gemini-3.6-flash"; // gemini-2.5-flash was retired for new API keys (Sept 2026); Google's own
-                                        // error response for this key directed us to gemini-3.6-flash specifically
+// Tried in order. gemini-2.5-flash was retired for new API keys (Sept 2026);
+// Google's own error for this key pointed us to gemini-3.6-flash. When the
+// flagship model is itself under heavy demand ("this model is currently
+// experiencing high demand"), we fall back to smaller/lighter models that
+// are usually less contended — worse quality in the rare case we reach
+// them, but far better than a hard failure.
+var GEMINI_MODEL_CHAIN = ["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"];
 
 function mapTranscriptToContents(transcript){
   return transcript.map(function(turn){
@@ -342,17 +347,22 @@ function mapTranscriptToContents(transcript){
   });
 }
 
-// Single attempt against Gemini. Rejects with {code, message, retryable}.
-// "retryable" marks transient, infrastructure-side failures (the model's
-// shared capacity being temporarily overloaded, or a one-off network blip)
-// as opposed to problems that won't fix themselves on retry (bad/expired
-// key, this account's own quota, blocked content, a malformed request).
-function performGeminiRequest(contents){
+// Single attempt against Gemini, against one specific model. Rejects with
+// {code, message, retryable, switchModel}.
+// - "retryable": worth a quick retry against the SAME model (a one-off
+//   network blip, or a transient overload that often clears in seconds).
+// - "switchModel": this model specifically is the problem (sustained
+//   overload that didn't clear after retrying, or the model id no longer
+//   exists for this key) — move on to the next model in GEMINI_MODEL_CHAIN
+//   rather than keep hammering the same one.
+// Neither flag is set for problems retrying/switching can't fix (bad key,
+// this account's own quota, blocked content, a malformed request).
+function performGeminiRequest(contents, model){
   var apiKey = getSavedApiKey();
   if(!apiKey){
-    return Promise.reject({code:"no_key", message:"저장된 API 키가 없습니다.", retryable:false});
+    return Promise.reject({code:"no_key", message:"저장된 API 키가 없습니다.", retryable:false, switchModel:false});
   }
-  var endpoint = "https://generativelanguage.googleapis.com/v1beta/models/" + GEMINI_MODEL + ":generateContent?key=" + encodeURIComponent(apiKey);
+  var endpoint = "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + encodeURIComponent(apiKey);
 
   return fetch(endpoint, {
     method: "POST",
@@ -365,47 +375,55 @@ function performGeminiRequest(contents){
       }
     })
   }).catch(function(){
-    throw {code:"network_error", message:"Gemini API 호출 중 네트워크 오류가 발생했습니다.", retryable:true};
+    throw {code:"network_error", message:"Gemini API 호출 중 네트워크 오류가 발생했습니다.", retryable:true, switchModel:false};
   }).then(function(geminiRes){
     return geminiRes.json().catch(function(){
-      throw {code:"invalid_upstream_response", message:"Gemini API 응답을 해석할 수 없습니다.", retryable:false};
+      throw {code:"invalid_upstream_response", message:"Gemini API 응답을 해석할 수 없습니다.", retryable:false, switchModel:false};
     }).then(function(geminiBody){
       if(!geminiRes.ok){
         var upstreamMsg = (geminiBody && geminiBody.error && geminiBody.error.message) || ("Gemini API 오류 (HTTP " + geminiRes.status + ")");
         if(geminiRes.status === 401 || geminiRes.status === 403){
-          throw {code:"invalid_key", message: upstreamMsg, retryable:false};
+          throw {code:"invalid_key", message: upstreamMsg, retryable:false, switchModel:false};
         }
         if(geminiRes.status === 429){
-          throw {code:"rate_limited", message: upstreamMsg, retryable:false};
+          throw {code:"rate_limited", message: upstreamMsg, retryable:false, switchModel:false};
+        }
+        if(geminiRes.status === 404){
+          // This model id no longer exists / isn't available to this key
+          // (the exact failure we hit with gemini-2.5-flash) — no point
+          // retrying it at all, go straight to the next model.
+          throw {code:"upstream_error", message: upstreamMsg, retryable:false, switchModel:true};
         }
         // 500/503 are Google's own "temporary overload / try again" signals
         // (e.g. "This model is currently experiencing high demand" — a
         // shared-capacity issue across ALL users of that model, unrelated
-        // to this key's own usage) — worth a couple of automatic retries.
-        var retryable = (geminiRes.status === 503 || geminiRes.status === 500);
-        throw {code:"upstream_error", message: upstreamMsg, retryable: retryable};
+        // to this key's own usage). Worth a quick retry, and if it's still
+        // failing after that, worth trying a different (likely less
+        // contended) model instead of waiting indefinitely on this one.
+        var overloaded = (geminiRes.status === 503 || geminiRes.status === 500);
+        throw {code:"upstream_error", message: upstreamMsg, retryable: overloaded, switchModel: overloaded};
       }
 
       if(geminiBody && geminiBody.promptFeedback && geminiBody.promptFeedback.blockReason){
-        throw {code:"blocked_content", message:"입력 내용이 안전 정책에 의해 차단되었습니다: " + geminiBody.promptFeedback.blockReason, retryable:false};
+        throw {code:"blocked_content", message:"입력 내용이 안전 정책에 의해 차단되었습니다: " + geminiBody.promptFeedback.blockReason, retryable:false, switchModel:false};
       }
 
       var candidate = geminiBody && geminiBody.candidates && geminiBody.candidates[0];
       if(!candidate){
-        throw {code:"no_candidate", message:"Gemini API가 응답 후보를 반환하지 않았습니다.", retryable:false};
+        throw {code:"no_candidate", message:"Gemini API가 응답 후보를 반환하지 않았습니다.", retryable:false, switchModel:false};
       }
       if(candidate.finishReason === "SAFETY"){
-        throw {code:"blocked_content", message:"생성된 응답이 안전 정책에 의해 차단되었습니다.", retryable:false};
+        throw {code:"blocked_content", message:"생성된 응답이 안전 정책에 의해 차단되었습니다.", retryable:false, switchModel:false};
       }
 
       var text = candidate.content && candidate.content.parts && candidate.content.parts[0] && candidate.content.parts[0].text;
       if(typeof text !== "string"){
-        throw {code:"empty_response", message:"Gemini API 응답에서 텍스트를 찾을 수 없습니다.", retryable:false};
+        throw {code:"empty_response", message:"Gemini API 응답에서 텍스트를 찾을 수 없습니다.", retryable:false, switchModel:false};
       }
 
       var parsed;
       try{ parsed = JSON.parse(text); }
-      catch(e){ throw {code:"invalid_json", message:"Gemini API 응답이 유효한 JSON이 아닙니다.", retryable:false}; }
+      catch(e){ throw {code:"invalid_json", message:"Gemini API 응답이 유효한 JSON이 아닙니다.", retryable:false, switchModel:false}; }
       return parsed;
     });
   });
@@ -413,17 +431,25 @@ function performGeminiRequest(contents){
 
 function delay(ms){ return new Promise(function(resolve){ setTimeout(resolve, ms); }); }
 
-// Retries only "retryable" (infrastructure-side, transient) failures, with
-// a short backoff — up to 2 retries (3 attempts total). Anything else
-// (bad key, this account's quota, blocked content) fails immediately,
-// since retrying those can't help.
-function performGeminiRequestWithRetry(contents, attempt){
+// Walks GEMINI_MODEL_CHAIN. For each model: up to 2 attempts with a short
+// backoff on "retryable" failures; if still failing and the failure says
+// "switchModel", move to the next model in the chain (fresh attempt budget)
+// instead of giving up. Anything not marked retryable/switchModel (bad key,
+// this account's quota, blocked content) fails immediately — no amount of
+// retrying or model-switching fixes those.
+function performGeminiRequestWithRetry(contents, modelIndex, attempt){
+  modelIndex = modelIndex || 0;
   attempt = attempt || 1;
-  return performGeminiRequest(contents).catch(function(err){
-    if(err && err.retryable && attempt < 3){
-      return delay(attempt === 1 ? 1500 : 3000).then(function(){
-        return performGeminiRequestWithRetry(contents, attempt + 1);
+  var model = GEMINI_MODEL_CHAIN[modelIndex];
+
+  return performGeminiRequest(contents, model).catch(function(err){
+    if(err && err.retryable && attempt < 2){
+      return delay(1500).then(function(){
+        return performGeminiRequestWithRetry(contents, modelIndex, attempt + 1);
       });
+    }
+    if(err && err.switchModel && modelIndex < GEMINI_MODEL_CHAIN.length - 1){
+      return performGeminiRequestWithRetry(contents, modelIndex + 1, 1);
     }
     throw err;
   });
@@ -432,7 +458,7 @@ function performGeminiRequestWithRetry(contents, attempt){
 function tailCallAI(userTurnContent){
   tailTranscript.push({role:"user", content: userTurnContent});
   var contents = mapTranscriptToContents(tailTranscript);
-  return performGeminiRequestWithRetry(contents).then(function(data){
+  return performGeminiRequestWithRetry(contents, 0, 1).then(function(data){
     tailTranscript.push({role:"assistant", content: JSON.stringify(data)});
     return data;
   });
